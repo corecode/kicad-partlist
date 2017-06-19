@@ -1,13 +1,37 @@
 require 'nokogiri'
 require 'optparse'
 
+class Part
+  def initialize(node)
+    @n = node
+  end
+
+  def [](x)
+    case x.downcase
+    when 'ref'
+      @n.xpath('@ref').to_s
+    when 'value'
+      @n.xpath('value/text()').to_s
+    when 'footprint'
+      @n.xpath('substring-after(footprint/text(), ":")').to_s
+    else
+      @n.xpath("fields/field[@name=\"#{x}\"]/text()").to_s
+    end
+  end
+
+  def fields
+    fields = @n.xpath('fields/field/@name').map(&:to_s)
+    ['Ref', 'Value', 'Footprint'] + fields
+  end
+end
+
 def print_csv(ary, dest)
-  ary.map do |elems|
-    l = elems.map do |e|
-      if /["',\\]/ === e
-        e = '"%s"'%e.gsub(/[\\"]/, '\\\1')
+  ary.map do |row|
+    l = row.map do |col|
+      if /["',\\]/ === col
+        col = '"%s"' % col.gsub(/[\\"]/, '\\\1')
       end
-      e
+      col
     end.join(",")
     dest.puts l
   end
@@ -34,6 +58,7 @@ def print_org(ary, dest)
   end
 end
 
+do_group = true
 outformat = :csv
 if $stdout.isatty
   outformat = :org
@@ -42,6 +67,9 @@ end
 OptionParser.new do |opts|
   opts.on('--fmt FORMAT') do |fmt|
     outformat = fmt.to_sym
+  end
+  opts.on('--long') do
+    do_group = false
   end
 end.parse!
 
@@ -56,36 +84,59 @@ end
 
 x = Nokogiri::XML(input)
 
-parts = x.xpath('//export/components/comp').map do |n|
-  {
-    count: '',
-    value: n.xpath('value/text()').to_s,
-    footprint: n.xpath('substring-after(footprint/text(), ":")').to_s,
-    bom: n.xpath('fields/field[@name="BOM"]/text()').to_s,
-    place: n.xpath('fields/field[@name="Place"]/text()').to_s,
-    ref: n.xpath('@ref').to_s,
-  }
+parts = x.xpath('//export/components/comp').map{|p| Part.new(p)}
+  # {
+  #   count: '',
+  #   value: n.xpath('value/text()').to_s,
+  #   footprint: n.xpath('substring-after(footprint/text(), ":")').to_s,
+  #   bom: n.xpath('fields/field[@name="BOM"]/text()').to_s,
+  #   place: n.xpath('fields/field[@name="Place"]/text()').to_s,
+  #   ref: n.xpath('@ref').to_s,
+  # }
+
+parts.select!{|p| !['nopart'].include?(p['Place'].downcase)}
+
+fields = parts.map{|p| p.fields}.flatten.uniq
+parttab = parts.map{|n| fields.map{|f| n[f]}}
+
+def collect(row, keys, fields)
+  result = []
+  keys.each do |k|
+    idx = fields.find_index(k)
+    next if !idx
+    result << row[idx]
+  end
+  result
 end
 
-parts.select!{|p| !['np', 'nopart'].include?p[:place].downcase }
-
-grouped = parts.group_by {|n|
-  if n[:bom] && n[:bom] != ""
-    n[:bom]
+grouped = parttab.group_by {|n|
+  partno = collect(n, ['Part Number', 'BOM', 'Manufacturer'], fields) - ['']
+  if !partno.empty?
+    partno
   else
-    [n[:bom], n[:footprint], n[:value], n[:place]]
+    collect(n, fields - ['Ref'], fields)
   end
 }.values
 
-res = grouped.map do |group|
+refidx = fields.find_index('Ref')
+groupedtab = grouped.map do |group|
   namedpart = group.first.dup
-  refs = group.map{|n| n[:ref]}
-  namedpart[:ref] = refs.sort_by{|s| s.scan(/[\d]+|[^\d]+/).map{|e| /\d+/ === e ? e.to_i : e}}.join(" ")
-  namedpart[:count] = refs.count
+  refs = group.map{|n| n[refidx]}
+  ref = refs.sort_by{|s| s.scan(/[\d]+|[^\d]+/).map{|e| /\d+/ === e ? e.to_i : e}}.join(" ")
+  noplace = group.select{|n| collect(n, ['Place'], fields) == ['DNP']}
+  namedpart[refidx] = ref
+  namedpart.insert(refidx+1, refs.count - noplace.count)
   namedpart
 end
 
-restab = [res.first.keys]
-restab += res.map{|n| n.values}
+
+if do_group
+  fields.insert(refidx+1, 'Count')
+  restab = [fields]
+  restab += groupedtab
+else
+  restab = [fields]
+  restab += parttab
+end
 
 send("print_#{outformat}", restab, $stdout)
