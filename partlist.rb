@@ -110,12 +110,14 @@ def collect(row, keys, fields)
 end
 
 grouped = parttab.group_by {|n|
-  partno = collect(n, ['Part Number', 'BOM', 'Manufacturer'], fields) - ['']
-  if !partno.empty?
-    partno
-  else
-    collect(n, fields - ['Ref'], fields)
+  #partno = collect(n, ['Part Number', 'BOM', 'Manufacturer'], fields) - ['']
+  grouping = fields - ['Ref']
+  if !(collect(n, ['Manufacturer', 'Part Number'], fields) - ['']).empty?
+    grouping -= ['Value']
   end
+  partno = collect(n, grouping, fields) - ['']
+  raise "invalid part number" if partno.empty?
+  partno
 }.values
 
 refidx = fields.find_index('Ref')
@@ -128,6 +130,8 @@ groupedtab = grouped.map do |group|
   namedpart.insert(refidx+1, refs.count - noplace.count)
   namedpart
 end
+
+groupedtab.select!{|g| g[refidx+1] > 0}
 
 
 if do_group
